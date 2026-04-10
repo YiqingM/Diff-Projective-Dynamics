@@ -1,0 +1,189 @@
+\documentclass[11pt,a4paper,onesided]{vci_anim_exercise}
+
+\usepackage[hidelinks]{hyperref}
+\usepackage{graphicx}
+\usepackage{bbm}
+\usepackage{ae,aecompl}
+\usepackage{subfigure}
+\usepackage{url}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{parskip}
+\usepackage[utf8]{inputenc}
+\urlstyle{tt}
+
+
+% Algorithm
+\usepackage[ruled, vlined]{algorithm2e}
+\SetKwProg{Fn}{Function}{}{}
+\SetAlCapNameFnt{\small}
+\SetAlCapFnt{\small}
+
+\renewcommand{\vec}[1]{\boldsymbol{\mathbf{#1}}}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+
+\title{Fluid Simulation in\\Computer Graphics\\Exercise Sheet 4}
+\author{Prof. Dr. Jan Bender, MSc. José Fernández\\{\scriptsize Contact: \{bender, fernandez\}@cs.rwth-aachen.de}}
+\date{Deadline: \textbf{18/12/19} (three weeks)}
+
+\begin{document}
+
+\maketitle
+
+In this assignment sheet, we will study and implement an implicit pressure solver based on a modified variant of Position Based Fluids, due to Macklin and Müller~\cite{mm13}. Their publication can be downloaded from \texttt{L2P}. It is a short paper - you are encouraged to spend some time reading it.
+
+\section*{An introduction to Position Based Fluids}
+In this exercise, we will use a modified version of Position Based Fluids (PBF)~\cite{mm13}, as an alternative solver to our current implementation of Weakly compressible SPH (WCSPH). Whereas WCSPH simply adds pressure forces and integrates the equations of motion explicitly (i.e., one does not have to solve a system of equations), PBF imposes constraints on the particles positions and solves for the \emph{constraint forces} which approximately lead to fulfillment of the constraints. Since we seek to simulate nearly incompressible fluids, it is natural to pose constraints that require the density measured at various particles to be equal to rest density. Mathematically, we write
+\begin{align}
+C_i(\hat{\vec x}) = \frac{\rho_i (\hat{\vec x})}{\rho_0} - 1 = 0.
+\end{align}
+The above \emph{constraint function} $C_i$ requires that the density of particle $i$ should be equal to rest density $\rho_0$. Here, we've denoted by $\hat{\vec x} \in \mathbb{R}^{3n}$ the concatenated vector of \textbf{all} particle positions involved in the computation of $\rho_i$, including boundary particles. More precisely, we have that
+\begin{align*}
+\hat{\vec x} = \begin{pmatrix}
+\vec x_1 \\
+\vec x_2 \\
+\vdots \\
+\vec x_n
+\end{pmatrix},
+\end{align*}
+where $n$ is the number of particles involved in the computation of $\rho_i$. 
+%We further assume that the first $n_f$ particle positions belong to fluid particles, and the remaining particle positions belong to boundary particles. The reason that we introduce $\hat{\vec x}$ is that the constraint functions in principle impose a constraint on the positions of \emph{all particles}. However, in practice, as we shall see, each constraint is localized to the neighborhood of the associated particle $i$. 
+
+PBF follows the general idea of Position Based Dynamics~\cite{mhhr07}, in which all constraints are solved in a local Newton-like solver. After evolving all particles forward in time according to the influence of external forces such as gravity and viscosity, we seek to find $\Delta \hat{\vec x}_i \in \mathbb{R}^{3n}$ such that, for each \emph{fluid} particle $i = 1, \dots, n_f$,
+\begin{align}
+C_i (\hat{\vec x} + \Delta \hat{\vec x}_i) = 0.
+\end{align}
+In the above, we have a single scalar equation and $3n$ variables $\Delta \hat{\vec x}_i$. As it turns out, for such constrained systems, a particular choice of direction for the position corrections is necessary to prevent the constraint forces from performing \emph{work} on the system (i.e. changing the overall energy of the system). Conveniently, this choice can be written
+\begin{align}
+\Delta \hat{\vec x}_i = M^{-1} \nabla C_i \, \lambda_i,
+\label{eq:pbf_position_update}
+\end{align}
+for some $\lambda_i \in \mathbb{R}$ and $M$ is a diagonal matrix containing the masses of the particles as diagonal $3 \times 3$ block matrices, in the form
+\begin{align*}
+M = \begin{pmatrix}
+m_1 I & 0     & \dots  & 0\\
+0     & m_2 I & \dots  & 0 \\
+0     & 0     & \ddots & 0 \\
+0     & 0     & \dots  & m_n I
+\end{pmatrix},
+\end{align*}
+with $I$ denoting the $3 \times 3$ identity matrix. There is a slight complication with the above definition of the mass matrix: Our boundary particles are static, and so, from the point of view of a dynamical system, they essentially have infinite mass (i.e., no amount of force will make them move). However, as it turns out, we will not need the mass matrix directly - instead, we will require only its inverse, which is again a diagonal matrix, with the inverse masses on the diagonal. In this case, we \emph{define} the inverse mass of a boundary particle to be zero, which turns out to be consistent with the equations of motion.
+
+This lets us express the position update for particle $i$ in terms of a single variable $\lambda_i$. We now take the first order approximation of our constraint function and obtain
+\begin{align}
+C_i (\hat{\vec x} + \Delta \hat{\vec x}_i) \approx C_i(\hat{\vec x}) + (\nabla C_i)^T \Delta \hat{\vec x}_i
+= C_i(\hat{\vec x}) + \underbrace{(\nabla C_i)^T M^{-1} \nabla C_i}_{S_i} \, \lambda_i = 0.
+\label{eq:constraint_linearization}
+\end{align}
+In the above, $S_i$ is a scalar, and clearly, if $S_i \neq 0$, then we may directly obtain $\lambda_i$ by rearranging the equations:
+\begin{align}
+\lambda_i = - \frac{C_i (\hat{\vec x})}{S_i}.
+\end{align}
+However, the above expression may lead to instabilities when neighboring particles are all very close to the boundary of the kernel support. To cope with this, we introduce a regularization parameter $\epsilon \approx 10^{-4}$ and write
+\begin{align}
+\lambda_i = - \frac{C_i (\hat{\vec x})}{S_i + \epsilon}.
+\end{align}
+
+Having obtained $\lambda_i$ for each constraint (particle), we could in principle compute the position changes from \eqref{eq:pbf_position_update}. However, we will show that there is a more convenient form available that more closely resembles the typical SPH formulas that we have worked with so far. Let us next derive an expression for the derivative of $C_i$ with respect to a particle $k$. Note that $k$ can represent either a fluid particle or a boundary particle. Recall that ${\rho_i = \sum_{j \in \mathcal{N}_i} m_j W_{ij} + \sum_{j \in \mathcal{N}_i^b} \rho_0 V_j W_{ij}}$, with $V_j$ the volume of boundary particle $j$. We obtain,
+\begin{align}
+\nonumber
+\nabla_{\vec x_k} C_i &= \frac{1}{\rho_0} \sum_{j \in \mathcal{N}_i} m_j \nabla_{\vec x_k} W_{ij}
++ \sum_{j \in \mathcal{N}_i^b} V_j \nabla_{\vec x_k} W_{ij} \\
+&=
+\begin{cases}
+\displaystyle
+\frac{1}{\rho_0} \sum_{j \in \mathcal{N}_i} m_j \nabla W_{ij} 
++ \sum_{j \in \mathcal{N}_i^b} V_j \nabla W_{ij} \qquad & \text{ if } k = i \, \text{ ($k$ is a fluid particle) }\\
+- \frac{m_k}{\rho_0} \nabla W_{ik} \qquad & \text{ if } k \neq i \text{ and $k$ is fluid particle }\\
+- V_k \nabla W_{ik} \qquad & \text{ if } k \neq i \text{ and $k$ is boundary particle }\\
+\end{cases}
+\label{eq:constraint_gradient}
+\end{align}
+where $\nabla W_{ij}$ and $\nabla W_{ik}$ correspond simply to the standard kernel gradient that we have worked with up to now, $\mathcal{N}_i$ represents the fluid particle neighborhood of fluid particle $i$, and $\mathcal{N}_i^b$ represents the boundary particle neighborhood of fluid particle $i$. However, it is not necessary to assemble $\nabla_{\vec x_k} C_i$ explicitly since it is only used to compute $S_i$ which can be done by directly summing up the contributions of each particle in the neighborhood:
+
+\begin{align}
+\label{eq:S}
+S_i = (\nabla C_i)^T M^{-1} \nabla C_i = 
+\frac{1}{m_i} \norm{ \sum_{j \in \mathcal{N}_i} \frac{m_j}{\rho_0} \nabla W_{ij} + 
+\sum_{k \in \mathcal{N}^b_i} V_k \nabla W_{ik} }^2 +
+\sum_{j \in \mathcal{N}_i} \frac{1}{m_j} \norm{ -\frac{m_j}{\rho_0} \nabla W_{ij} }^2 +
+\sum_{k \in \mathcal{N}^b_i} \frac{1}{m_k} \norm{ -V_k \nabla W_{ik} }^2
+\end{align}
+
+Note that the last term corresponding to the static boundary particles doesn't need to be computed since Position Based methods assign infinite mass to static bodies, and therefore $\frac{1}{m_k} = 0$.
+
+Summing up all the contributions from all constraint forces on a single particle $i$, we can show that the position update for particle $i$ is:
+\begin{align}
+\Delta \vec x_i = \underbrace{\frac{1}{\rho_0} \sum_{j \in \mathcal{N}_i} \bigg( \frac{m_j}{m_i} \lambda_i + \lambda_j \bigg) \, \nabla W_{ij}
+}_\text{fluid contribution}
++ \underbrace{\sum_{k \in \mathcal{N}^b_i} \frac{V_k}{m_i} \lambda_i \, \nabla W_{ik}}_\text{boundary contribution}.
+\label{eq:delta_x}
+\end{align}
+
+So far, we have shown how to perform a single position update for all particles such that they approximately satisfy the \emph{linearized} constraint \eqref{eq:constraint_linearization}. However, our constraint is non-linear. The idea of PBF is then to perform multiple iterations of what we have outlined so far. That is, we perform a sequence of position updates which - given enough iterations - should converge towards the exact solution. We note that in practice, PBF converges extremely slowly to a high accuracy solution. However, usually, this is also not necessary for a satisfactory result: a handful of iterations typically suffices.
+
+So far we have only considered the \emph{equality constraint} $C_i = 0$. In the original PBF paper~\cite{mm13}, they use this equality constraint along with some artificial pressure terms to prevent particle clumping and instabilities. Instead, we will do as we did with WCSPH and use pressure clamping to avoid attractive forces between particles due to underpressure. Thankfully, this modification is simple: Instead of treating $C_i$ as an equality constraint, we treat it as an inequality constraint of the form $C_i \leq 0$. The only change this needs to our procedure is in the computation of $\lambda_i$:
+\begin{align}
+\lambda_i = \begin{cases}
+- \frac{C_i}{S_i + \epsilon} \qquad & \text{ if } C_i > 0 \\
+0 \qquad & \text{ otherwise }
+\end{cases}.
+\label{eq:lambda}
+\end{align}
+In other words, if the constraint is violated ($C_i > 0$), then we apply a position change through $\lambda_i$. Otherwise, the constraint is already fulfilled and we simply do nothing.
+
+At the end of the algorithm, velocities must be corrected to match the changes to the particle positions. This is straightforward:
+\begin{align*}
+v_i^{n + 1} = \frac{x_i^{n + 1} - x_i^n}{\Delta t},
+\end{align*}
+where $\vec x_i^n$ is the initial position at the very beginning of the time step (i.e. before any integration at all).
+
+\begin{algorithm}
+    \DontPrintSemicolon
+Sample fluid and boundary particles.\\
+Perform a neighborhood search.\\
+\While{$t_{simulation}$ < $t_{end}$}{
+	$\Delta t =$ min($\Delta t_{CFL}$, $\Delta t_{default}$) \\
+	Compute fluid particles density. \\
+	Compute accelerations with gravity and viscosity.\\
+	Integrate particles positions in time using the modified Semi-Implicit Euler scheme.\\
+	Update a neighborhood search.\\
+    \While{iter < $n_{\text{PBF\_iterations}}$}{
+    	Compute fluid particles density. \\
+        \For{{\upshape\textbf{all}} particles $i$}{
+            Compute $S_i$ from \eqref{eq:S}\;
+        }
+        \For{{\upshape\textbf{all}} particles $i$}{
+            Compute $\lambda_i$ from \eqref{eq:lambda}\;
+        }
+        \For{{\upshape\textbf{all}} particles $i$}{
+            Compute $\Delta \vec x_i$ from \eqref{eq:delta_x}\;
+        }
+        \For{{\upshape\textbf{all}} particles $i$}{
+            $\vec x_i \gets \vec x_i + \Delta \vec x_i$\;
+        }
+    }
+    \For{{\upshape\textbf{all}} particles $i$}{
+    	$\vec x_i^{n + 1} \gets \vec x_i$\;
+        $\vec v_i^{n + 1} \gets \frac {\vec x_i^{n + 1} - \vec x_i^n} {\Delta t}$\;
+    }
+	$t_{simulation} \mathrel{+}= \Delta t$ \\
+}
+    \caption{Simulation loop for the Position Based Fluids algorithm.}
+    \label{alg:pbf}
+\end{algorithm}
+
+\section{Position Based Fluids implementation}
+In this assignment, you will extend your simulator with an implementation of the PBF algorithm that we have outlined above (see Algorithm \ref{alg:pbf} for reference). You should make your simulator capable of switching out the solver used, so that you can easily re-run the same scenes with different solvers. Come up with some non-trivial scenes to test your PBF solver and compare the solution with respect to the WCSPH solver from previous assignments. Try different number of particles, time step sizes and number of constraint iterations (PBF) or pressure stiffness (WCSPH) and comment on the stability, compressibility and run time differences between them.
+
+Keep in mind that PBF and WCSPH will \emph{not} produce a similar result for similar parameters. For example, since PBF is dissipative by construction, you will need much less (or none) viscosity to get similar results than WCSPH.
+
+\textbf{Note:} Typical good test scenes are the \textit{``dam break''} and the \textit{``double dam break''} with consist on one or two boxes of fluid falling inside a closed box. The higher the fluid columns, the harder it is to get a stable simulation.
+
+\textbf{Note:} Since comparing PBF and WCSPH should be an important part of your final presentation and report, it is recommended that you spend some time designing good test scenes where you can showcase their main differences. You should prepare plots to support your findings.
+
+\bibliographystyle{alpha}
+\bibliography{bibliography}
+
+\end{document}
