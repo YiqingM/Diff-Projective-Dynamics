@@ -28,6 +28,13 @@ namespace pd
 
         void run(); // main simulation loop
 
+        std::vector<Eigen::Vector3d> getPositions() const { return m_positions; }
+        const std::vector<std::vector<Eigen::Vector3d>>& getXHistory() const { return m_x_history; }
+        double computeGradient(
+            const std::vector<Eigen::Vector3d>& target_positions,
+            double& dLdw
+        );
+
     private:
         // --- Core PD pipeline (called each timestep) ---
         void step(const double dt);
@@ -43,6 +50,16 @@ namespace pd
         // to the difference of its endpoints. The matrix A is constant as long as
         // constraints don't change, so we only factorize once.
         void prefactorize();
+
+        // --- DiffPD backward (Algorithm 2) ---
+        // Solve the adjoint system: nabla^2 g(x) * z = (dL/dx)^T
+        // using the local-global iterative solver that reuses A's Cholesky factorization.
+        // Returns dL/dy for this timestep and outputs z for dL/dw accumulation.
+        std::vector<Eigen::Vector3d> backwardStep(
+            const std::vector<Eigen::Vector3d>& x,
+            const std::vector<Eigen::Vector3d>& dLdx,
+            std::vector<Eigen::Vector3d>& z_out
+        );
 
         // --- Particle state ---
         std::vector<Eigen::Vector3d> m_positions;    // current positions q_n
@@ -80,5 +97,9 @@ namespace pd
         // Indices of vertices with Dirichlet boundary conditions
         // (positions remain unchanged during simulation)
         std::unordered_set<int> m_fixed_points;
+
+        // --- Forward history for backward pass ---
+        std::vector<std::vector<Eigen::Vector3d>> m_x_history; // positions after each timestep
+        std::vector<std::vector<Eigen::Vector3d>> m_y_history; // momentum estimates each timestep
     };
 }
